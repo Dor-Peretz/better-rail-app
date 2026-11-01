@@ -37,13 +37,14 @@ class ArrivalAlarmModule(reactContext: ReactApplicationContext) : ReactContextBa
         promise.resolve(authorization())
     }
 
-    /** alarm - { rideId, alarmId, stopText, stops: [{ train, title, fireDate (ms) }] }. Resolves with [{ train, fireDate (ms) }], when each will ring. */
+    /** alarm - { rideId, alarmId, stopText, stops: [{ train, phase, title, fireDate (ms) }] }. Resolves with [{ train, phase, fireDate (ms) }]. */
     @ReactMethod
     fun scheduleArrivalAlarm(alarm: ReadableMap, promise: Promise) {
         try {
             val stops = maps(alarm.getArray("stops")).map {
                 ArrivalAlarmStop(
                     train = it.getInt("train"),
+                    phase = if (it.hasKey("phase")) it.getString("phase") ?: "primary" else "primary",
                     title = it.getString("title") ?: throw IllegalArgumentException("title"),
                     fireDate = it.getDouble("fireDate").toLong(),
                     isScheduled = true,
@@ -73,7 +74,10 @@ class ArrivalAlarmModule(reactContext: ReactApplicationContext) : ReactContextBa
         val alarmId = push.getString("alarmId")
         val fireDates = maps(if (push.hasKey("stops")) push.getArray("stops") else null)
             .filter { it.hasKey("train") && it.hasKey("fireDate") }
-            .associate { it.getInt("train") to (it.getDouble("fireDate") * 1000).toLong() }
+            .associate {
+                val phase = if (it.hasKey("phase")) it.getString("phase") ?: "primary" else "primary"
+                "${it.getInt("train")}:$phase" to (it.getDouble("fireDate") * 1000).toLong()
+            }
         if (rideId == null || alarmId == null || fireDates.isEmpty()) {
             promise.resolve(false)
             return
@@ -87,7 +91,7 @@ class ArrivalAlarmModule(reactContext: ReactApplicationContext) : ReactContextBa
         ArrivalAlarmScheduler.cancel(reactApplicationContext)
     }
 
-    /** Resolves with { rideId, alarmId, stops: [{ train, fireDate (ms), status }] }, or null when there's no alarm. */
+    /** Resolves with { rideId, alarmId, stops: [{ train, phase, fireDate (ms), status }] }, or null when there's no alarm. */
     @ReactMethod
     fun getArrivalAlarm(promise: Promise) {
         val state = ArrivalAlarmScheduler.current(reactApplicationContext)
@@ -150,6 +154,7 @@ class ArrivalAlarmModule(reactContext: ReactApplicationContext) : ReactContextBa
                 pushMap(
                     Arguments.createMap().apply {
                         putInt("train", stop.train)
+                        putString("phase", stop.phase)
                         putDouble("fireDate", stop.fireDate.toDouble())
                         if (withState) putString("status", stop.status)
                     },

@@ -1,5 +1,6 @@
-import { NativeModules, Platform } from "react-native"
+import { Linking, NativeModules, Platform } from "react-native"
 import { getVersion } from "react-native-device-info"
+import type { ArrivalAlarmPhase } from "@/utils/helpers/arrival-alarm-helpers"
 
 // iOS: AlarmKit, in the RNBetterRail module. Android: an exact AlarmManager alarm that rings from a foreground service.
 const native = Platform.OS === "ios" ? NativeModules.RNBetterRail : NativeModules.ArrivalAlarm
@@ -27,12 +28,16 @@ export async function scheduleArrivalAlarm(alarm: {
   rideId: string
   alarmId: string
   stopText: string
-  stops: { train: number; title: string; fireDate: number }[]
-}): Promise<{ train: number; fireDate: number }[]> {
+  stops: { train: number; phase: ArrivalAlarmPhase; title: string; fireDate: number }[]
+}): Promise<{ train: number; phase: ArrivalAlarmPhase; fireDate: number }[]> {
   return native.scheduleArrivalAlarm(alarm)
 }
 
-export type ArrivalAlarmPush = { rideId: string; alarmId: string; stops: { train: number; fireDate: number }[] }
+export type ArrivalAlarmPush = {
+  rideId: string
+  alarmId: string
+  stops: { train: number; phase: ArrivalAlarmPhase; fireDate: number }[]
+}
 
 /**
  * Applies an arrival-alarm push (fire dates in seconds, as the server sends them) to the stops that didn't ring yet.
@@ -59,7 +64,7 @@ export type ArrivalAlarmStopStatus = "scheduled" | "rang" | "missed" | "unknown"
 export async function getArrivalAlarm(): Promise<{
   rideId: string
   alarmId: string
-  stops: { train: number; fireDate: number; status: ArrivalAlarmStopStatus }[]
+  stops: { train: number; phase: ArrivalAlarmPhase; fireDate: number; status: ArrivalAlarmStopStatus }[]
 } | null> {
   return native.getArrivalAlarm()
 }
@@ -70,7 +75,11 @@ export async function canUseFullScreenAlarm(): Promise<boolean> {
   return native.canUseFullScreenIntent()
 }
 
-/** Android: opens the setting the alarm is missing. `fullScreen` for the lock screen takeover, otherwise exact alarms or notifications. */
+/** Opens the setting the alarm is missing. Android can deep-link; iOS opens app settings. */
 export function openArrivalAlarmSettings(kind: "fullScreen" | "permissions") {
-  native.openArrivalAlarmSettings(kind)
+  if (typeof native?.openArrivalAlarmSettings === "function") {
+    native.openArrivalAlarmSettings(kind)
+    return
+  }
+  Linking.openSettings()
 }

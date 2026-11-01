@@ -5,6 +5,9 @@ import { isAccentThemeId, type AccentThemeId } from "@/theme/accent-themes"
 export type MaxChanges = 0 | 1 | null
 export type ColorSchemePreference = "automatic" | "light" | "dark"
 export const TRAIN_INFO_PROMPT_SEARCH_THRESHOLD = 2
+export const ARRIVAL_ALARM_LEAD_MINUTE_OPTIONS = [1, 3, 5, 7, 10, 15] as const
+export type ArrivalAlarmLeadMinutes = (typeof ARRIVAL_ALARM_LEAD_MINUTE_OPTIONS)[number]
+export const DEFAULT_ARRIVAL_ALARM_LEAD_MINUTES: ArrivalAlarmLeadMinutes = 5
 
 export interface SettingsState {
   seenUrgentMessagesIds: number[]
@@ -22,6 +25,10 @@ export interface SettingsState {
   maxChanges: MaxChanges
   trainSearchCount: number
   seenTrainInfoPrompt: boolean
+  /** Default lead time when enabling an arrival alarm from a live ride */
+  arrivalAlarmLeadMinutes: ArrivalAlarmLeadMinutes
+  /** When on, also schedule a closer second warning before each chosen stop */
+  arrivalAlarmSecondWarningEnabled: boolean
 }
 
 export interface SettingsActions {
@@ -38,6 +45,8 @@ export interface SettingsActions {
   recordTrainSearch: () => void
   setSeenUrgentMessagesIds: (messagesIds: number[]) => void
   setSeenTrainInfoPrompt: (seen: boolean) => void
+  setArrivalAlarmLeadMinutes: (minutes: ArrivalAlarmLeadMinutes) => void
+  setArrivalAlarmSecondWarningEnabled: (enabled: boolean) => void
 }
 
 export type SettingsStore = SettingsState & SettingsActions
@@ -62,9 +71,14 @@ const initialSettingsState: SettingsState = {
   maxChanges: null,
   trainSearchCount: 0,
   seenTrainInfoPrompt: false,
+  arrivalAlarmLeadMinutes: DEFAULT_ARRIVAL_ALARM_LEAD_MINUTES,
+  arrivalAlarmSecondWarningEnabled: false,
 }
 
 export const resetSettingsStore = () => useSettingsStore.setState(initialSettingsState)
+
+const isArrivalAlarmLeadMinutes = (value: unknown): value is ArrivalAlarmLeadMinutes =>
+  typeof value === "number" && (ARRIVAL_ALARM_LEAD_MINUTE_OPTIONS as readonly number[]).includes(value)
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   ...initialSettingsState,
@@ -125,6 +139,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   setSeenTrainInfoPrompt(seen) {
     set({ seenTrainInfoPrompt: seen })
   },
+
+  setArrivalAlarmLeadMinutes(minutes) {
+    set({ arrivalAlarmLeadMinutes: minutes })
+  },
+
+  setArrivalAlarmSecondWarningEnabled(enabled) {
+    set({ arrivalAlarmSecondWarningEnabled: enabled })
+  },
 }))
 
 /** How many route filters the user has turned on — the toolbar shows the number, not just that one is on. */
@@ -173,6 +195,8 @@ export function getSettingsSnapshot(state: SettingsState) {
     maxChanges: state.maxChanges,
     trainSearchCount: state.trainSearchCount,
     seenTrainInfoPrompt: state.seenTrainInfoPrompt,
+    arrivalAlarmLeadMinutes: state.arrivalAlarmLeadMinutes,
+    arrivalAlarmSecondWarningEnabled: state.arrivalAlarmSecondWarningEnabled,
   }
 }
 
@@ -207,5 +231,9 @@ export function hydrateSettingsStore(data: any) {
     maxChanges: processedData.maxChanges ?? null,
     trainSearchCount,
     seenTrainInfoPrompt: processedData.seenTrainInfoPrompt ?? false,
+    arrivalAlarmLeadMinutes: isArrivalAlarmLeadMinutes(processedData.arrivalAlarmLeadMinutes)
+      ? processedData.arrivalAlarmLeadMinutes
+      : DEFAULT_ARRIVAL_ALARM_LEAD_MINUTES,
+    arrivalAlarmSecondWarningEnabled: processedData.arrivalAlarmSecondWarningEnabled === true,
   })
 }

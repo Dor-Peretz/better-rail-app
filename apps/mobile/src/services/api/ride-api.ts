@@ -77,8 +77,14 @@ export class RideApi {
   /** Lets the server move the arrival alarm when the delay changes. Resolves with when each stop should ring, in ms. */
   async setRideAlarm(
     rideId: string,
-    alarm: { token: string; alarmId: string; leadMinutes: number; stops: number[] },
-  ): Promise<{ train: number; fireDate: number }[] | undefined> {
+    alarm: {
+      token: string
+      alarmId: string
+      leadMinutes: number
+      secondaryLeadMinutes?: number
+      stops: number[]
+    },
+  ): Promise<{ train: number; phase: "primary" | "secondary"; fireDate: number }[] | undefined> {
     try {
       const response = await this.axiosInstance.put("/ride/alarm", { rideId, ...alarm, locale: userLocale })
       return response.data?.success && Array.isArray(response.data.stops) ? response.data.stops : undefined

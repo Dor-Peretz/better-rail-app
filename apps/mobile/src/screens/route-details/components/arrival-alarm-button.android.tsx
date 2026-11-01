@@ -2,6 +2,7 @@ import { Image, View } from "react-native"
 import { StyleSheet } from "react-native-unistyles"
 import { ContextMenu, type ContextMenuAction } from "@/components/context-menu/context-menu"
 import { useRideStore } from "@/models"
+import { useSettingsStore } from "@/models/settings/settings"
 import {
   ARRIVAL_ALARM_LEAD_MINUTES,
   disableArrivalAlarm,
@@ -17,11 +18,13 @@ import { useArrivalAlarmStopOptions } from "./use-arrival-alarm-stop-options"
 /** Rings before the rider's stops. A Material dropdown on a button the size of the stop button. */
 export function ArrivalAlarmButton({ now }: { now: number }) {
   const arrivalAlarm = useRideStore((s) => s.arrivalAlarm)
+  const defaultLeadMinutes = useSettingsStore((s) => s.arrivalAlarmLeadMinutes)
+  const selectedLeadMinutes = arrivalAlarm?.leadMinutes ?? defaultLeadMinutes
   const stopOptions = useArrivalAlarmStopOptions(now)
 
   const actions: ContextMenuAction[] = ARRIVAL_ALARM_LEAD_MINUTES.map((minutes) => ({
     title: translate("ride.alarmLeadOption", { minutes }) ?? "",
-    selected: arrivalAlarm?.leadMinutes === minutes,
+    selected: selectedLeadMinutes === minutes,
     onPress: async () => showEnableArrivalAlarmResult(await enableArrivalAlarm(minutes), minutes),
   }))
 

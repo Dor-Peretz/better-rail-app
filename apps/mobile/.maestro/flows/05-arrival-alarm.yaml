@@ -1,0 +1,45 @@
+appId: ${MAESTRO_APP_ID}
+name: Arrival alarm settings preferences
+tags:
+  - arrival-alarm
+  - settings
+---
+# Default lead time and second-warning prefs. Enabling the live-ride alarm control
+# (testID arrival-alarm-button) still needs a started ride plus Android exact alarms
+# or iOS 26 AlarmKit — cover that on device, not in this flow.
+- runFlow: ../subflows/launch-clean.yaml
+- tapOn:
+    id: "open-settings-button"
+- assertVisible:
+    id: "settings-screen"
+- tapOn:
+    id: "settings-arrival-alarm"
+- assertVisible:
+    id: "arrival-alarm-settings-screen"
+- assertVisible:
+    id: "arrival-alarm-lead-5-selected"
+- tapOn:
+    id: "arrival-alarm-lead-3"
+- assertVisible:
+    id: "arrival-alarm-lead-3-selected"
+- assertVisible:
+    id: "arrival-alarm-second-warning-off"
+- tapOn:
+    id: "arrival-alarm-second-warning-off"
+- assertVisible:
+    id: "arrival-alarm-second-warning-on"
+
+# Preferences survive an app restart.
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: "planner-screen"
+    timeout: 30000
+- tapOn:
+    id: "open-settings-button"
+- tapOn:
+    id: "settings-arrival-alarm"
+- assertVisible:
+    id: "arrival-alarm-lead-3-selected"
+- assertVisible:
+    id: "arrival-alarm-second-warning-on"

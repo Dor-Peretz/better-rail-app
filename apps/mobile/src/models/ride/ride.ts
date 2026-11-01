@@ -57,7 +57,9 @@ export type ArrivalAlarm = {
   rideId: string
   alarmId: string
   leadMinutes: number
-  /** One alarm for each stop the rider gets off: a transfer, the destination, or both */
+  /** Closer second warning, when the rider enabled it in settings */
+  secondaryLeadMinutes?: number
+  /** One alarm for each stop the rider gets off: a transfer, the destination, or both (primary and optional secondary) */
   stops: ArrivalAlarmStop[]
 }
 
@@ -72,8 +74,8 @@ export interface RideState {
   arrivalAlarm: ArrivalAlarm | undefined
   /** The stops the rider chose to ring before, by train. Undefined for the next stop. */
   arrivalAlarmStops: number[] | undefined
-  /** The stops whose alarm already rang this ride, by train, so a changed alarm doesn't ring them again */
-  arrivalAlarmRangStops: number[]
+  /** Phases that already rang this ride (`train:phase`), so a changed alarm doesn't ring them again */
+  arrivalAlarmRangStops: string[]
   /** A ride whose server-side alarm couldn't be removed yet, so it doesn't keep pushing moves */
   pendingArrivalAlarmRemoval: string | undefined
   /** Android: the rider was already asked to let the alarm take over the lock screen */
@@ -299,6 +301,29 @@ export function getRideSnapshot(state: RideState) {
   return rest
 }
 
+const migrateArrivalAlarmRangStops = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (typeof item === "number") return [`${item}:primary`]
+    if (typeof item === "string") return [item]
+    return []
+  })
+}
+
+const migrateArrivalAlarm = (alarm: any): ArrivalAlarm | undefined => {
+  if (!alarm) return undefined
+  return {
+    ...alarm,
+    stops: Array.isArray(alarm.stops)
+      ? alarm.stops.map((stop: any) => ({
+          train: stop.train,
+          fireDate: stop.fireDate,
+          phase: stop.phase === "secondary" ? "secondary" : "primary",
+        }))
+      : [],
+  }
+}
+
 export function hydrateRideStore(data: any) {
   if (!data) return
   useRideStore.setState({
@@ -309,9 +334,9 @@ export function hydrateRideStore(data: any) {
     notificationPermissionState: data.notificationPermissionState ?? undefined,
     rideCount: data.rideCount ?? 0,
     canRunLiveActivities: Platform.OS === "android" ? isLiveRideSupported() : (data.canRunLiveActivities ?? false),
-    arrivalAlarm: data.arrivalAlarm ?? undefined,
+    arrivalAlarm: migrateArrivalAlarm(data.arrivalAlarm),
     arrivalAlarmStops: data.arrivalAlarmStops ?? undefined,
-    arrivalAlarmRangStops: data.arrivalAlarmRangStops ?? [],
+    arrivalAlarmRangStops: migrateArrivalAlarmRangStops(data.arrivalAlarmRangStops),
     pendingArrivalAlarmRemoval: data.pendingArrivalAlarmRemoval ?? undefined,
     arrivalAlarmFullScreenPrompted: data.arrivalAlarmFullScreenPrompted ?? false,
   })

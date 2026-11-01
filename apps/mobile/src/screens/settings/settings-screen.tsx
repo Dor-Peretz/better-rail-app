@@ -56,11 +56,18 @@ export function SettingsScreen() {
         />
         <SettingBox
           testID="settings-appearance"
-          last
           title={translate("settings.uiSettings") ?? ""}
           icon="🎨"
           chevron
           onPress={() => router.push("/settings/ui-settings")}
+        />
+        <SettingBox
+          testID="settings-arrival-alarm"
+          last
+          title={translate("settings.arrivalAlarm") ?? ""}
+          icon="⏰"
+          chevron
+          onPress={() => router.push("/settings/arrival-alarm")}
         />
       </View>
 

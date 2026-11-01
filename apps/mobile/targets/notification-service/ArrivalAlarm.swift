@@ -18,12 +18,37 @@ import SwiftUI
 import AlarmKit
 
 struct ArrivalAlarmStop: Codable, Equatable {
-  /// The train the rider gets off, by its index in the route. Pushes refer to stops by it.
+  /// The train the rider gets off, by its index in the route.
   let train: Int
+  /// "primary" or "secondary". Pushes refer to stops by train + phase.
+  var phase: String
   let title: String
   var fireDate: Date
   /// The AlarmKit alarm currently scheduled. Changes on every reschedule.
   var systemAlarmId: UUID? = nil
+
+  var key: String { "\(train):\(phase)" }
+
+  enum CodingKeys: String, CodingKey {
+    case train, phase, title, fireDate, systemAlarmId
+  }
+
+  init(train: Int, phase: String = "primary", title: String, fireDate: Date, systemAlarmId: UUID? = nil) {
+    self.train = train
+    self.phase = phase
+    self.title = title
+    self.fireDate = fireDate
+    self.systemAlarmId = systemAlarmId
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    train = try container.decode(Int.self, forKey: .train)
+    phase = try container.decodeIfPresent(String.self, forKey: .phase) ?? "primary"
+    title = try container.decode(String.self, forKey: .title)
+    fireDate = try container.decode(Date.self, forKey: .fireDate)
+    systemAlarmId = try container.decodeIfPresent(UUID.self, forKey: .systemAlarmId)
+  }
 }
 
 struct ArrivalAlarmState: Codable, Equatable {
@@ -32,7 +57,7 @@ struct ArrivalAlarmState: Codable, Equatable {
   let alarmId: UUID
   /// Only shown on iOS 26.0, which still draws its own stop button.
   let stopText: String
-  /// One alarm for each stop the rider gets off: a transfer, the destination, or both
+  /// One alarm for each stop/phase the rider gets off: a transfer, the destination, or both
   var stops: [ArrivalAlarmStop]
 }
 
@@ -141,8 +166,8 @@ enum ArrivalAlarmStore {
 struct ArrivalAlarmPush {
   let rideId: String
   let alarmId: UUID
-  /// Where each stop's alarm moves to, by train
-  let fireDates: [Int: Date]
+  /// Where each stop's alarm moves to, by train:phase
+  let fireDates: [String: Date]
   /// Replaces the notification body when the alarm couldn't be moved.
   let failedBody: String?
 
@@ -153,11 +178,12 @@ struct ArrivalAlarmPush {
           let stops = alarm["stops"] as? [[String: Any]]
     else { return nil }
 
-    let fireDates = stops.compactMap { stop -> (Int, Date)? in
+    let fireDates = stops.compactMap { stop -> (String, Date)? in
       guard let train = (stop["train"] as? NSNumber)?.intValue,
             let fireDate = (stop["fireDate"] as? NSNumber)?.doubleValue
       else { return nil }
-      return (train, Date(timeIntervalSince1970: fireDate))
+      let phase = (stop["phase"] as? String) ?? "primary"
+      return ("\(train):\(phase)", Date(timeIntervalSince1970: fireDate))
     }
 
     self.rideId = rideId
@@ -207,7 +233,7 @@ enum ArrivalAlarmScheduler {
     }
 
     do {
-      state = try await scheduleStops(of: state, trains: Set(state.stops.map(\.train)))
+      state = try await scheduleStops(of: state, keys: Set(state.stops.map(\.key)))
     } catch {
       release(ids)
       throw error
@@ -233,8 +259,8 @@ enum ArrivalAlarmScheduler {
     }
   }
 
-  /// The alarm with what became of each stop's alarm, by train. Also cancels the alarms nothing points to.
-  static func current() -> (state: ArrivalAlarmState, statuses: [Int: ArrivalAlarmStopStatus])? {
+  /// The alarm with what became of each stop's alarm, by train+phase. Also cancels the alarms nothing points to.
+  static func current() -> (state: ArrivalAlarmState, statuses: [String: ArrivalAlarmStopStatus])? {
     for attempt in 1...3 {
       let read: ArrivalAlarmRecord
       do {
@@ -284,10 +310,10 @@ enum ArrivalAlarmScheduler {
       case .done: return true
       case .failed: return false
       case .retry: continue
-      case let .move(moved, trains, ids):
+      case let .move(moved, keys, ids):
         let scheduled: ArrivalAlarmState
         do {
-          scheduled = try await scheduleStops(of: moved, trains: trains)
+          scheduled = try await scheduleStops(of: moved, keys: keys)
         } catch {
           release(ids)
           return false
@@ -322,8 +348,8 @@ enum ArrivalAlarmScheduler {
     case failed
     /// The store changed since it was read
     case retry
-    /// Schedule `trains` of the moved alarm with the ids claimed for them, then save it if the claim still stands.
-    case move(ArrivalAlarmState, trains: Set<Int>, ids: [UUID])
+    /// Schedule the moved stops (by key) with the ids claimed for them, then save if the claim still stands.
+    case move(ArrivalAlarmState, keys: Set<String>, ids: [UUID])
   }
 
   private static func plan(_ push: ArrivalAlarmPush, in record: inout ArrivalAlarmRecord, snapshot: Snapshot) -> MoveStep {
@@ -335,24 +361,24 @@ enum ArrivalAlarmScheduler {
     guard !statuses.values.contains(.unknown) else { return .failed }
 
     var moved = state
-    var trains = Set<Int>()
+    var keys = Set<String>()
     for index in moved.stops.indices {
       let stop = moved.stops[index]
       // A stop that already rang stays put, since moving it would ring it again.
-      guard statuses[stop.train] == .scheduled, let fireDate = push.fireDates[stop.train], fireDate != stop.fireDate else { continue }
+      guard statuses[stop.key] == .scheduled, let fireDate = push.fireDates[stop.key], fireDate != stop.fireDate else { continue }
       moved.stops[index].fireDate = fireDate
       moved.stops[index].systemAlarmId = UUID()
-      trains.insert(stop.train)
+      keys.insert(stop.key)
     }
-    guard !trains.isEmpty else { return .done }
+    guard !keys.isEmpty else { return .done }
 
-    let ids = moved.stops.filter { trains.contains($0.train) }.compactMap(\.systemAlarmId)
+    let ids = moved.stops.filter { keys.contains($0.key) }.compactMap(\.systemAlarmId)
     record.pending += ids.map { PendingSystemAlarm(id: $0, revision: record.revision) }
-    return .move(moved, trains: trains, ids: ids)
+    return .move(moved, keys: keys, ids: ids)
   }
 
   /// `snapshot` nil for when the listing can't be trusted
-  private static func statuses(of state: ArrivalAlarmState, in snapshot: Snapshot?, now: Date = Date()) -> [Int: ArrivalAlarmStopStatus] {
+  private static func statuses(of state: ArrivalAlarmState, in snapshot: Snapshot?, now: Date = Date()) -> [String: ArrivalAlarmStopStatus] {
     func status(of stop: ArrivalAlarmStop) -> ArrivalAlarmStopStatus {
       guard let snapshot else { return .unknown }
       // Turning alarms off in Settings removes them without ringing.
@@ -366,7 +392,7 @@ enum ArrivalAlarmScheduler {
       return stop.systemAlarmId != nil && stop.fireDate <= now ? .rang : .missed
     }
 
-    return Dictionary(state.stops.map { ($0.train, status(of: $0)) }, uniquingKeysWith: { first, _ in first })
+    return Dictionary(state.stops.map { ($0.key, status(of: $0)) }, uniquingKeysWith: { first, _ in first })
   }
 
   /// Saves the state if the alarms it schedules are still claimed. False when another change won.
@@ -414,13 +440,13 @@ enum ArrivalAlarmScheduler {
     return result
   }
 
-  /// Schedules a new AlarmKit alarm for each stop in `trains`, with the id it already has. All or none, so a failure leaves the rider with the current ones.
-  private static func scheduleStops(of state: ArrivalAlarmState, trains: Set<Int>) async throws -> ArrivalAlarmState {
+  /// Schedules a new AlarmKit alarm for each stop in `keys`, with the id it already has. All or none, so a failure leaves the rider with the current ones.
+  private static func scheduleStops(of state: ArrivalAlarmState, keys: Set<String>) async throws -> ArrivalAlarmState {
     var state = state
     var scheduledIds: [UUID] = []
 
     do {
-      for index in state.stops.indices where trains.contains(state.stops[index].train) {
+      for index in state.stops.indices where keys.contains(state.stops[index].key) {
         var stop = state.stops[index]
         guard let systemAlarmId = stop.systemAlarmId else { continue }
         stop.fireDate = max(stop.fireDate, Date().addingTimeInterval(5))

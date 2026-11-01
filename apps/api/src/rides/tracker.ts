@@ -26,7 +26,7 @@ import { getRouteForRide } from "../requests"
 import { NotificationPayload } from "../types/notification"
 import { NotFoundRouteForRide, RideNotInTimeError } from "../utils/errors"
 import { buildNotifications, getUpdatedLastNotification } from "../utils/ride-utils"
-import { getAlarmFireDate, getAlarmMove } from "../utils/alarm-utils"
+import { buildAlarmStops, getAlarmMove } from "../utils/alarm-utils"
 import { buildWaitForTrainNotiifcation, getNotificationToSend, rideUpdateSecond } from "../utils/notify-utils"
 
 const PRODUCTION_TICK_MS = 60_000
@@ -191,9 +191,12 @@ export class RideTracker {
 
   /** Saves the arrival alarm and returns when each stop should ring, or undefined when it couldn't be saved */
   setAlarm(request: RideAlarmRequest) {
-    const stops = request.stops
-      .filter((train) => this.route.trains[train])
-      .map((train) => ({ train, fireDate: getAlarmFireDate(this.route, train, request.leadMinutes) }))
+    const stops = buildAlarmStops(
+      this.route,
+      request.stops,
+      request.leadMinutes,
+      request.secondaryLeadMinutes,
+    )
     if (stops.length === 0) return undefined
 
     this.ride.alarm = { ...request, stops }

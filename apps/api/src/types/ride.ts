@@ -25,11 +25,17 @@ export const RideRequestSchema = z.object({
 
 export type RideRequest = z.infer<typeof RideRequestSchema>
 
+export const ArrivalAlarmPhaseSchema = z.enum(["primary", "secondary"])
+
+export type ArrivalAlarmPhase = z.infer<typeof ArrivalAlarmPhaseSchema>
+
 export const RideAlarmRequestSchema = z.object({
   // The app's own APNs token: the ride token belongs to the Live Activity, whose pushes never reach app code.
   token: z.string().min(1),
   alarmId: z.uuid(),
   leadMinutes: z.number().int().min(1).max(30),
+  /** Optional closer second warning before each chosen stop */
+  secondaryLeadMinutes: z.number().int().min(1).max(10).optional(),
   locale: z.enum(LanguageCode),
   /** The trains to ring before getting off, by their index in the route: a transfer, the destination, or both */
   stops: z.number().int().min(0).max(10).array().nonempty().max(MAX_ROUTE_TRAINS),
@@ -40,6 +46,8 @@ export type RideAlarmRequest = z.infer<typeof RideAlarmRequestSchema>
 export const RideAlarmStopSchema = z.object({
   /** The train the rider gets off, by its index in the route */
   train: z.number(),
+  /** Primary lead-time warning, or the closer optional second warning */
+  phase: ArrivalAlarmPhaseSchema.default("primary"),
   /** When the alarm on the device rings, in ms */
   fireDate: z.number(),
 })

@@ -5,6 +5,7 @@ import { LanguageCode } from "../../src/locales/i18n"
 import { RouteItem } from "../../src/types/rail"
 import {
   buildAlarmMovedTexts,
+  buildAlarmStops,
   buildAndroidAlarmMessage,
   buildApnAlarmData,
   getAlarmFireDate,
@@ -32,10 +33,11 @@ const routeWithDelay = (delays: number[]) =>
     }),
   })
 
-const alarm = (stops: RideAlarmStop[]): RideAlarm => ({
+const alarm = (stops: RideAlarmStop[], secondaryLeadMinutes?: number): RideAlarm => ({
   token: "device-token",
   alarmId: "6f1c7a52-58f1-4b47-9c55-6c1d5d1d2a11",
   leadMinutes: 7,
+  secondaryLeadMinutes,
   locale: LanguageCode.en,
   stops,
 })
@@ -52,32 +54,57 @@ describe("arrival alarm", () => {
     expect(getAlarmFireDate(route, 1, 30)).toBe(transferTime + minutesInMs(5 + 3))
   })
 
+  it("builds a primary stop and an optional closer second warning", () => {
+    expect(buildAlarmStops(routeWithDelay([0, 0]), [1], 7, 2, now)).toEqual([
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(7) },
+      { train: 1, phase: "secondary", fireDate: arrivalTime - minutesInMs(2) },
+    ])
+  })
+
+  it("skips a second warning that would duplicate the primary", () => {
+    expect(buildAlarmStops(routeWithDelay([0, 0]), [1], 2, 2, now)).toEqual([
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(2) },
+    ])
+  })
+
   it("moves the stops whose delay grew or shrank", () => {
     const transfer = transferTime - minutesInMs(7)
     const destination = arrivalTime - minutesInMs(7)
-    const stops = [
-      { train: 0, fireDate: transfer },
-      { train: 1, fireDate: destination },
+    const stops: RideAlarmStop[] = [
+      { train: 0, phase: "primary", fireDate: transfer },
+      { train: 1, phase: "primary", fireDate: destination },
     ]
 
     expect(getAlarmMove(alarm(stops), routeWithDelay([0, 4]), now)).toEqual([
-      { train: 0, fireDate: transfer },
-      { train: 1, fireDate: destination + minutesInMs(4) },
+      { train: 0, phase: "primary", fireDate: transfer },
+      { train: 1, phase: "primary", fireDate: destination + minutesInMs(4) },
     ])
-    expect(getAlarmMove(alarm([{ train: 1, fireDate: destination + minutesInMs(10) }]), routeWithDelay([0, 0]), now)).toEqual([
-      { train: 1, fireDate: destination },
+    expect(
+      getAlarmMove(alarm([{ train: 1, phase: "primary", fireDate: destination + minutesInMs(10) }]), routeWithDelay([0, 0]), now),
+    ).toEqual([{ train: 1, phase: "primary", fireDate: destination }])
+  })
+
+  it("moves secondary warnings with their own lead time", () => {
+    const stops: RideAlarmStop[] = [
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(7) },
+      { train: 1, phase: "secondary", fireDate: arrivalTime - minutesInMs(2) },
+    ]
+
+    expect(getAlarmMove(alarm(stops, 2), routeWithDelay([0, 4]), now)).toEqual([
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(3) },
+      { train: 1, phase: "secondary", fireDate: arrivalTime + minutesInMs(2) },
     ])
   })
 
   it("stays put for moves under a minute", () => {
-    const stops = [{ train: 1, fireDate: arrivalTime - minutesInMs(7) + 30 * 1000 }]
+    const stops: RideAlarmStop[] = [{ train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(7) + 30 * 1000 }]
     expect(getAlarmMove(alarm(stops), routeWithDelay([0, 0]), now)).toBeUndefined()
   })
 
   it("doesn't move a stop that already rang", () => {
-    const stops = [
-      { train: 0, fireDate: now - 1000 },
-      { train: 1, fireDate: arrivalTime - minutesInMs(7) },
+    const stops: RideAlarmStop[] = [
+      { train: 0, phase: "primary", fireDate: now - 1000 },
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(7) },
     ]
     expect(getAlarmMove(alarm(stops), routeWithDelay([10, 0]), now)).toBeUndefined()
     expect(getAlarmMove(alarm(stops), routeWithDelay([10, 2]), now)?.[0]).toEqual(stops[0])
@@ -85,32 +112,32 @@ describe("arrival alarm", () => {
 
   it("tells about the first stop that moved, in Israel's time zone", () => {
     const current = alarm([
-      { train: 0, fireDate: transferTime - minutesInMs(7) },
-      { train: 1, fireDate: arrivalTime - minutesInMs(7) },
+      { train: 0, phase: "primary", fireDate: transferTime - minutesInMs(7) },
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(7) },
     ])
-    const moved = [current.stops[0], { train: 1, fireDate: arrivalTime - minutesInMs(1) }]
+    const moved = [current.stops[0], { train: 1, phase: "primary" as const, fireDate: arrivalTime - minutesInMs(1) }]
 
     const texts = buildAlarmMovedTexts(current, routeWithDelay([0, 6]), moved)
     expect(texts.title).toBe("Alarm moved to 08:29")
     expect(texts.body).toBe("It will ring 7 minutes before arriving at Tel Aviv - Savidor Center.")
   })
 
-  it("sends iOS the stops in seconds", () => {
-    const stops = [{ train: 1, fireDate: arrivalTime - minutesInMs(3) }]
+  it("sends iOS the stops in seconds with phase", () => {
+    const stops: RideAlarmStop[] = [{ train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(3) }]
     expect(buildApnAlarmData("ride-1", alarm(stops), stops, "failed")).toEqual({
       alarm: {
         rideId: "ride-1",
         alarmId: alarm(stops).alarmId,
-        stops: [{ train: 1, fireDate: stops[0].fireDate / 1000 }],
+        stops: [{ train: 1, phase: "primary", fireDate: stops[0].fireDate / 1000 }],
         failedBody: "failed",
       },
     })
   })
 
   it("sends Android a data-only message that expires when the last alarm rings", () => {
-    const stops = [
-      { train: 0, fireDate: transferTime - minutesInMs(3) },
-      { train: 1, fireDate: arrivalTime - minutesInMs(3) },
+    const stops: RideAlarmStop[] = [
+      { train: 0, phase: "primary", fireDate: transferTime - minutesInMs(3) },
+      { train: 1, phase: "primary", fireDate: arrivalTime - minutesInMs(3) },
     ]
     const texts = buildAlarmMovedTexts(alarm(stops), routeWithDelay([4, 4]), stops)
     const message = buildAndroidAlarmMessage("ride-1", alarm(stops), texts, stops, now)
@@ -121,7 +148,7 @@ describe("arrival alarm", () => {
         type: "arrival-alarm",
         rideId: "ride-1",
         alarmId: alarm(stops).alarmId,
-        stops: JSON.stringify(stops.map(({ train, fireDate }) => ({ train, fireDate: fireDate / 1000 }))),
+        stops: JSON.stringify(stops.map(({ train, phase, fireDate }) => ({ train, phase, fireDate: fireDate / 1000 }))),
         title: texts.title,
       },
       android: { priority: "high", collapseKey: "arrival-alarm-ride-1", ttl: stops[1].fireDate - now },

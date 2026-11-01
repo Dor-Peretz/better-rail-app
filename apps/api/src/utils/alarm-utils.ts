@@ -1,7 +1,7 @@
 import type { FcmMessage } from "../push/fcm"
 
 import { RouteItem } from "../types/rail"
-import { RideAlarm, RideAlarmStop } from "../types/ride"
+import { ArrivalAlarmPhase, RideAlarm, RideAlarmStop } from "../types/ride"
 import { stationsObject } from "../data/stations"
 import { LanguageCode, railApiLocales, translate } from "../locales/i18n"
 
@@ -22,6 +22,41 @@ export const getAlarmFireDate = (route: RouteItem, train: number, leadMinutes: n
   return Math.max(arrivalTime - leadMinutes * 60 * 1000, departureTime) + delay * 60 * 1000
 }
 
+const leadMinutesForPhase = (alarm: RideAlarm, phase: ArrivalAlarmPhase = "primary") =>
+  phase === "secondary" ? (alarm.secondaryLeadMinutes ?? alarm.leadMinutes) : alarm.leadMinutes
+
+/**
+ * Builds primary (and optional secondary) fire dates for the chosen trains.
+ * Skips a secondary that would duplicate or precede the primary.
+ */
+export const buildAlarmStops = (
+  route: RouteItem,
+  trains: number[],
+  leadMinutes: number,
+  secondaryLeadMinutes?: number,
+  now = Date.now(),
+): RideAlarmStop[] => {
+  const stops: RideAlarmStop[] = []
+
+  for (const train of trains) {
+    if (!route.trains[train]) continue
+
+    const primaryFire = getAlarmFireDate(route, train, leadMinutes)
+    if (primaryFire > now) {
+      stops.push({ train, phase: "primary", fireDate: primaryFire })
+    }
+
+    if (secondaryLeadMinutes == null || leadMinutes <= secondaryLeadMinutes) continue
+
+    const secondaryFire = getAlarmFireDate(route, train, secondaryLeadMinutes)
+    if (secondaryFire > now && secondaryFire > primaryFire) {
+      stops.push({ train, phase: "secondary", fireDate: secondaryFire })
+    }
+  }
+
+  return stops
+}
+
 /** The stops with the fire dates to move the device's alarms to, or undefined when they should stay put */
 export const getAlarmMove = (alarm: RideAlarm, route: RouteItem, now: number) => {
   let moved = false
@@ -29,11 +64,11 @@ export const getAlarmMove = (alarm: RideAlarm, route: RouteItem, now: number) =>
     // It already rang, and moving it would make it ring again.
     if (stop.fireDate <= now || !route.trains[stop.train]) return stop
 
-    const fireDate = getAlarmFireDate(route, stop.train, alarm.leadMinutes)
+    const fireDate = getAlarmFireDate(route, stop.train, leadMinutesForPhase(alarm, stop.phase ?? "primary"))
     if (Math.abs(fireDate - stop.fireDate) < MIN_ALARM_MOVE_MS) return stop
 
     moved = true
-    return { ...stop, fireDate }
+    return { ...stop, phase: stop.phase ?? "primary", fireDate }
   })
 
   return moved ? stops : undefined
@@ -41,7 +76,11 @@ export const getAlarmMove = (alarm: RideAlarm, route: RouteItem, now: number) =>
 
 /** Fire dates in seconds, as the devices take them */
 const pushStops = (stops: RideAlarmStop[]) =>
-  stops.map(({ train, fireDate }) => ({ train, fireDate: Math.floor(fireDate / 1000) }))
+  stops.map(({ train, phase, fireDate }) => ({
+    train,
+    phase: phase ?? "primary",
+    fireDate: Math.floor(fireDate / 1000),
+  }))
 
 export const buildApnAlarmData = (rideId: string, alarm: RideAlarm, stops: RideAlarmStop[], failedBody: string) => ({
   alarm: { rideId, alarmId: alarm.alarmId, stops: pushStops(stops), failedBody },
@@ -87,11 +126,12 @@ export const buildAlarmMovedTexts = (alarm: RideAlarm, route: RouteItem, stops: 
   const moved = stops.find((stop, index) => stop.fireDate !== alarm.stops[index]?.fireDate) ?? stops[0]
   const stationId = route.trains[moved.train]?.destinationStationId ?? 0
   const time = clockFormatter.format(moved.fireDate)
+  const minutes = leadMinutesForPhase(alarm, moved.phase ?? "primary")
 
   return {
     title: translate("notifications.alarm.moved.title", alarm.locale, { time }),
     body: translate("notifications.alarm.moved.description", alarm.locale, {
-      minutes: alarm.leadMinutes,
+      minutes,
       station: stationName(stationId, alarm.locale),
     }),
     // Shown instead when the device couldn't move the alarm.

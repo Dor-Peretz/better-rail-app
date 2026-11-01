@@ -41,6 +41,10 @@ export default function SettingsLayout() {
         name="ui-settings"
         options={{ title: translate("settings.uiSettings") ?? "", headerTitleStyle: titleStyle }}
       />
+      <Stack.Screen
+        name="arrival-alarm"
+        options={{ title: translate("settings.arrivalAlarm") ?? "", headerTitleStyle: titleStyle }}
+      />
       <Stack.Screen name="tip-jar" options={{ title: translate("settings.tipJar") ?? "", headerTitleStyle: titleStyle }} />
       <Stack.Screen name="about" options={{ title: translate("settings.about") ?? "", headerTitleStyle: titleStyle }} />
       <Stack.Screen name="privacy" options={{ title: translate("settings.privacy") ?? "", headerTitleStyle: titleStyle }} />

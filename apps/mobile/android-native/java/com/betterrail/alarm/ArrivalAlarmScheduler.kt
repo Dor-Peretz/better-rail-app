@@ -9,10 +9,12 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** One stop the rider gets off: a transfer or the destination. */
+/** One ring before a stop: the primary lead-time warning, or the closer optional second warning. */
 data class ArrivalAlarmStop(
-    /** The train the rider gets off, by its index in the route. Pushes refer to stops by it. */
+    /** The train the rider gets off, by its index in the route. */
     val train: Int,
+    /** "primary" or "secondary". Pushes refer to stops by train + phase. */
+    val phase: String,
     val title: String,
     /** When it rings, in ms */
     val fireDate: Long,
@@ -29,8 +31,11 @@ data class ArrivalAlarmStop(
             else -> "rang"
         }
 
+    fun key(): String = "$train:$phase"
+
     fun toJson(): JSONObject = JSONObject()
         .put("train", train)
+        .put("phase", phase)
         .put("title", title)
         .put("fireDate", fireDate)
         .put("isScheduled", isScheduled)
@@ -39,6 +44,7 @@ data class ArrivalAlarmStop(
     companion object {
         fun fromJson(obj: JSONObject) = ArrivalAlarmStop(
             train = obj.getInt("train"),
+            phase = if (obj.has("phase")) obj.getString("phase") else "primary",
             title = obj.getString("title"),
             fireDate = obj.getLong("fireDate"),
             isScheduled = obj.getBoolean("isScheduled"),
@@ -53,7 +59,7 @@ data class ArrivalAlarmState(
     /** Identifies the alarm the rider set; pushes carry it. A new lead time or new stops get a new id. */
     val alarmId: String,
     val stopText: String,
-    /** One alarm for each stop the rider gets off: a transfer, the destination, or both */
+    /** One alarm for each stop/phase the rider gets off: a transfer, the destination, or both */
     val stops: List<ArrivalAlarmStop>,
 ) {
     fun toJson(): String = JSONObject()
@@ -104,7 +110,7 @@ object ArrivalAlarmScheduler {
     // A date in the past rings right away, since the rider is already late.
     private const val MIN_DELAY_MS = 5_000L
 
-    // A restored alarm this late still rings before arrival, since the shortest lead time is 3 minutes.
+    // A restored alarm this late still rings before arrival, since the shortest lead time is 1 minute.
     private const val RESTORE_GRACE_MS = 2 * 60 * 1000L
 
     fun canScheduleExactAlarms(context: Context): Boolean =
@@ -117,11 +123,11 @@ object ArrivalAlarmScheduler {
     @Synchronized
     fun schedule(context: Context, state: ArrivalAlarmState): ArrivalAlarmState {
         val current = ArrivalAlarmStore.load(context)
-        val scheduled = scheduleStops(context, state, state.stops.map { it.train }.toSet())
+        val scheduled = scheduleStops(context, state, state.stops.map { it.key() }.toSet())
 
         // A stop of the current alarm that the new one doesn't have.
-        current?.stops?.filter { stop -> scheduled.stops.none { it.train == stop.train } }?.forEach {
-            alarmManager(context).cancel(fireIntent(context, it.train, 0))
+        current?.stops?.filter { stop -> scheduled.stops.none { it.key() == stop.key() } }?.forEach {
+            alarmManager(context).cancel(fireIntent(context, it.train, it.phase, 0))
         }
 
         ArrivalAlarmStore.save(context, scheduled)
@@ -131,26 +137,26 @@ object ArrivalAlarmScheduler {
     @Synchronized
     fun cancel(context: Context) {
         ArrivalAlarmStore.load(context)?.stops?.forEach {
-            alarmManager(context).cancel(fireIntent(context, it.train, 0))
+            alarmManager(context).cancel(fireIntent(context, it.train, it.phase, 0))
         }
         ArrivalAlarmStore.save(context, null)
         ArrivalAlarmService.stopRinging()
     }
 
-    /** Moves the stops that didn't ring yet to the dates a push asked for (by train, in ms). Returns false when it couldn't. */
+    /** Moves the stops that didn't ring yet to the dates a push asked for (by train+phase, in ms). Returns false when it couldn't. */
     @Synchronized
-    fun move(context: Context, rideId: String, alarmId: String, fireDates: Map<Int, Long>): Boolean {
+    fun move(context: Context, rideId: String, alarmId: String, fireDates: Map<String, Long>): Boolean {
         val state = ArrivalAlarmStore.load(context)
         // The rider turned the alarm off or changed it, so the push is stale.
         if (state == null || state.rideId != rideId || !state.alarmId.equals(alarmId, ignoreCase = true)) return true
         // A stop that already rang stays put, since moving it would ring it again.
-        val pending = state.stops.filter { it.isScheduled }.map { it.train }.toSet()
+        val pending = state.stops.filter { it.isScheduled }.map { it.key() }.toSet()
         if (pending.isEmpty()) return true
 
         val moved = state.copy(
             stops = state.stops.map { stop ->
-                val fireDate = fireDates[stop.train]
-                if (stop.train in pending && fireDate != null) stop.copy(fireDate = fireDate) else stop
+                val fireDate = fireDates[stop.key()]
+                if (stop.key() in pending && fireDate != null) stop.copy(fireDate = fireDate) else stop
             },
         )
 
@@ -182,13 +188,16 @@ object ArrivalAlarmScheduler {
      * meantime: a broadcast already on its way when the alarm moved carries the old date.
      */
     @Synchronized
-    fun markRang(context: Context, train: Int, fireDate: Long): ArrivalAlarmStop? {
+    fun markRang(context: Context, train: Int, phase: String, fireDate: Long): ArrivalAlarmStop? {
         val state = ArrivalAlarmStore.load(context) ?: return null
-        val stop = state.stops.find { it.train == train } ?: return null
+        val stop = state.stops.find { it.train == train && it.phase == phase } ?: return null
         if (!stop.isScheduled || stop.fireDate != fireDate) return null
 
         val rang = stop.copy(isScheduled = false)
-        ArrivalAlarmStore.save(context, state.copy(stops = state.stops.map { if (it.train == train) rang else it }))
+        ArrivalAlarmStore.save(
+            context,
+            state.copy(stops = state.stops.map { if (it.train == train && it.phase == phase) rang else it }),
+        )
         return rang
     }
 
@@ -202,7 +211,7 @@ object ArrivalAlarmScheduler {
         val current = state.copy(
             stops = state.stops.map { if (it.isScheduled && it.fireDate < missed) it.copy(isScheduled = false, missed = true) else it },
         )
-        val pending = current.stops.filter { it.isScheduled }.map { it.train }.toSet()
+        val pending = current.stops.filter { it.isScheduled }.map { it.key() }.toSet()
 
         // A date that just passed (an app update or a reboot around the fire time) rings right away.
         try {
@@ -213,20 +222,20 @@ object ArrivalAlarmScheduler {
         }
     }
 
-    /** Sets the alarms of the stops in `trains`, replacing their current ones. Throws when exact alarms aren't allowed. */
-    private fun scheduleStops(context: Context, state: ArrivalAlarmState, trains: Set<Int>): ArrivalAlarmState {
-        if (trains.isNotEmpty() && !canScheduleExactAlarms(context)) throw SecurityException("Exact alarms aren't allowed")
+    /** Sets the alarms of the stops in `keys`, replacing their current ones. Throws when exact alarms aren't allowed. */
+    private fun scheduleStops(context: Context, state: ArrivalAlarmState, keys: Set<String>): ArrivalAlarmState {
+        if (keys.isNotEmpty() && !canScheduleExactAlarms(context)) throw SecurityException("Exact alarms aren't allowed")
 
         val now = System.currentTimeMillis()
         return state.copy(
             stops = state.stops.map { stop ->
-                if (stop.train !in trains) return@map stop
+                if (stop.key() !in keys) return@map stop
 
                 val scheduled = stop.copy(fireDate = maxOf(stop.fireDate, now + MIN_DELAY_MS), isScheduled = true, missed = false)
                 // setAlarmClock: exact even in Doze, shows the alarm icon in the status bar, and lets the
                 // receiver start the ringing service from the background.
                 val info = AlarmManager.AlarmClockInfo(scheduled.fireDate, openAppIntent(context))
-                alarmManager(context).setAlarmClock(info, fireIntent(context, stop.train, scheduled.fireDate))
+                alarmManager(context).setAlarmClock(info, fireIntent(context, stop.train, stop.phase, scheduled.fireDate))
                 scheduled
             },
         )
@@ -234,16 +243,20 @@ object ArrivalAlarmScheduler {
 
     private fun alarmManager(context: Context) = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
-    // One identity for each stop's train, so a new schedule replaces the last. The extras tell a stale delivery apart.
-    private fun fireIntent(context: Context, train: Int, fireDate: Long): PendingIntent = PendingIntent.getBroadcast(
+    // One identity for each stop's train+phase, so a new schedule replaces the last. The extras tell a stale delivery apart.
+    private fun fireIntent(context: Context, train: Int, phase: String, fireDate: Long): PendingIntent = PendingIntent.getBroadcast(
         context,
-        train,
+        requestCode(train, phase),
         Intent(context, ArrivalAlarmReceiver::class.java)
             .setAction(ArrivalAlarmReceiver.ACTION_FIRE)
             .putExtra(ArrivalAlarmReceiver.EXTRA_TRAIN, train)
+            .putExtra(ArrivalAlarmReceiver.EXTRA_PHASE, phase)
             .putExtra(ArrivalAlarmReceiver.EXTRA_FIRE_DATE, fireDate),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
+
+    private fun requestCode(train: Int, phase: String): Int =
+        train * 10 + if (phase == "secondary") 1 else 0
 
     fun openAppIntent(context: Context): PendingIntent? {
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return null

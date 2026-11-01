@@ -15,15 +15,20 @@ import {
   scheduleArrivalAlarm,
 } from "@/utils/arrival-alarm-native"
 import {
+  ARRIVAL_ALARM_SECONDARY_LEAD_MINUTES,
   ArrivalAlarmStop,
+  arrivalAlarmStopKey,
+  buildArrivalAlarmStops,
   getArrivalAlarmFireDate,
   getArrivalAlarmStops,
+  hasArrivalAlarmTrainRang,
   toggleArrivalAlarmStop,
 } from "@/utils/helpers/arrival-alarm-helpers"
 import { getStationById } from "@/data/stations"
+import { useSettingsStore } from "@/models/settings/settings"
 import { ArrivalAlarm, useRideStore } from "./ride"
 
-export const ARRIVAL_ALARM_LEAD_MINUTES = [3, 5, 7, 10, 15]
+export const ARRIVAL_ALARM_LEAD_MINUTES = [1, 3, 5, 7, 10, 15]
 
 // Smaller moves aren't worth rescheduling.
 const MIN_ALARM_MOVE_MS = 60 * 1000
@@ -43,18 +48,26 @@ const stopTitle = (route: RouteItem, train: number) => {
   return translate(isTransfer ? "ride.alarmTitleTransfer" : "ride.alarmTitle", { station }) ?? ""
 }
 
+const matchesStop = (left: { train: number; phase?: string }, right: { train: number; phase?: string }) =>
+  left.train === right.train && (left.phase ?? "primary") === (right.phase ?? "primary")
+
 /** Schedules the alarm's stops and returns them with when each will ring */
 const schedule = async (alarm: ArrivalAlarm, route: RouteItem): Promise<ArrivalAlarmStop[]> => {
   const scheduled = await scheduleArrivalAlarm({
     rideId: alarm.rideId,
     alarmId: alarm.alarmId,
     stopText: translate("ride.alarmStop") ?? "",
-    stops: alarm.stops.map(({ train, fireDate }) => ({ train, fireDate, title: stopTitle(route, train) })),
+    stops: alarm.stops.map(({ train, phase, fireDate }) => ({
+      train,
+      phase,
+      fireDate,
+      title: stopTitle(route, train),
+    })),
   })
 
   return alarm.stops.map((stop) => ({
     ...stop,
-    fireDate: scheduled.find(({ train }) => train === stop.train)?.fireDate ?? stop.fireDate,
+    fireDate: scheduled.find((item) => matchesStop(item, stop))?.fireDate ?? stop.fireDate,
   }))
 }
 
@@ -66,22 +79,26 @@ export type EnableArrivalAlarmResult =
   | "denied"
   | "failed"
 
-/** Rings `leadMinutes` before each of the `chosen` stops, or the ones the rider chose before */
-export async function enableArrivalAlarm(leadMinutes: number, chosen?: number[]): Promise<EnableArrivalAlarmResult> {
+/** Rings before each of the `chosen` stops. Omitting `leadMinutes` uses the settings default. */
+export async function enableArrivalAlarm(leadMinutes?: number, chosen?: number[]): Promise<EnableArrivalAlarmResult> {
   const { id: rideId, route, arrivalAlarm: current } = useRideStore.getState()
   if (!rideId || !route) return "failed"
+
+  const settings = useSettingsStore.getState()
+  const resolvedLeadMinutes = leadMinutes ?? settings.arrivalAlarmLeadMinutes
+  const secondaryLeadMinutes = settings.arrivalAlarmSecondWarningEnabled ? ARRIVAL_ALARM_SECONDARY_LEAD_MINUTES : undefined
 
   // Only the device knows which stops rang: a push may have moved one past its time here.
   if (current) await updateFromDevice(current, "extension")
   const { arrivalAlarmStops, arrivalAlarmRangStops } = useRideStore.getState()
 
   const now = Date.now()
-  const stops = getArrivalAlarmStops(route, chosen ?? arrivalAlarmStops, now)
-    // A stop that already rang isn't rung again.
-    .filter((train) => !arrivalAlarmRangStops.includes(train))
-    .map((train) => ({ train, fireDate: getArrivalAlarmFireDate(route, train, leadMinutes) }))
-    // A stop too close to ring before still leaves the later ones.
-    .filter((stop) => stop.fireDate > now)
+  const trains = getArrivalAlarmStops(route, chosen ?? arrivalAlarmStops, now).filter(
+    (train) => !hasArrivalAlarmTrainRang(arrivalAlarmRangStops, train),
+  )
+  const stops = buildArrivalAlarmStops(route, trains, resolvedLeadMinutes, { secondaryLeadMinutes, now }).filter(
+    (stop) => !arrivalAlarmRangStops.includes(arrivalAlarmStopKey(stop.train, stop.phase)),
+  )
   if (stops.length === 0) return "tooLate"
 
   let authorization = await arrivalAlarmAuthorization()
@@ -91,7 +108,13 @@ export async function enableArrivalAlarm(leadMinutes: number, chosen?: number[])
   if (authorization !== "authorized") return "denied"
 
   // A new id even when only the lead time or the stops change, so a push for the old setting can't move it.
-  const alarm: ArrivalAlarm = { rideId, alarmId: createAlarmId(), leadMinutes, stops }
+  const alarm: ArrivalAlarm = {
+    rideId,
+    alarmId: createAlarmId(),
+    leadMinutes: resolvedLeadMinutes,
+    secondaryLeadMinutes,
+    stops,
+  }
 
   try {
     alarm.stops = await schedule(alarm, route)
@@ -105,7 +128,8 @@ export async function enableArrivalAlarm(leadMinutes: number, chosen?: number[])
     pendingArrivalAlarmRemoval: undefined,
   })
   trackEvent("arrival_alarm_enabled", {
-    lead_minutes: leadMinutes,
+    lead_minutes: resolvedLeadMinutes,
+    secondary_lead_minutes: secondaryLeadMinutes ?? 0,
     stop_count: stops.length,
     has_transfer_stop: stops.some(({ train }) => train < route.trains.length - 1),
   })
@@ -140,7 +164,7 @@ export async function toggleArrivalAlarmStopChoice(train: number): Promise<Enabl
   const current = getArrivalAlarmStops(route, arrivalAlarmStops)
   const chosen = toggleArrivalAlarmStop(current, train)
   // The alarm keeps at least one stop that can still ring; turning it off is its own button.
-  if (!chosen?.some((stop) => !arrivalAlarmRangStops.includes(stop))) return undefined
+  if (!chosen?.some((stop) => !hasArrivalAlarmTrainRang(arrivalAlarmRangStops, stop))) return undefined
 
   // Checking a stop that's too close to ring before leaves the alarm as it is.
   const adding = !current.includes(train)
@@ -182,7 +206,8 @@ async function retryArrivalAlarmRemoval(pendingRideId: string, rideId: string | 
 /** Hands the alarm to the server, which pushes new times whenever the delay changes, and applies the times it answers with. */
 export async function syncArrivalAlarmWithServer() {
   const { id: rideId, route, arrivalAlarm: alarm, arrivalAlarmRangStops: rang } = useRideStore.getState()
-  const pending = alarm?.stops.filter((stop) => !rang.includes(stop.train) && stop.fireDate > Date.now()) ?? []
+  const pending =
+    alarm?.stops.filter((stop) => !rang.includes(arrivalAlarmStopKey(stop.train, stop.phase)) && stop.fireDate > Date.now()) ?? []
   if (!rideId || !route || !alarm || alarm.rideId !== rideId || pending.length === 0) return
 
   let token: string
@@ -192,11 +217,13 @@ export async function syncArrivalAlarmWithServer() {
     return
   }
 
+  const trains = [...new Set(pending.map(({ train }) => train))]
   const stops = await rideApi.setRideAlarm(rideId, {
     token,
     alarmId: alarm.alarmId,
     leadMinutes: alarm.leadMinutes,
-    stops: pending.map(({ train }) => train),
+    secondaryLeadMinutes: alarm.secondaryLeadMinutes,
+    stops: trains,
   })
   if (!stops) return
 
@@ -204,9 +231,13 @@ export async function syncArrivalAlarmWithServer() {
   const current = useRideStore.getState().arrivalAlarm
   if (current?.alarmId !== alarm.alarmId) return
 
-  const moved = stops.some(({ train, fireDate }) => {
-    const stop = current.stops.find((own) => own.train === train)
-    return stop && !rang.includes(train) && Math.abs(fireDate - stop.fireDate) >= MIN_ALARM_MOVE_MS
+  const moved = stops.some((serverStop) => {
+    const stop = current.stops.find((own) => matchesStop(own, serverStop))
+    return (
+      stop &&
+      !rang.includes(arrivalAlarmStopKey(stop.train, stop.phase)) &&
+      Math.abs(serverStop.fireDate - stop.fireDate) >= MIN_ALARM_MOVE_MS
+    )
   })
   if (!moved) return
 
@@ -214,7 +245,11 @@ export async function syncArrivalAlarmWithServer() {
   const push = {
     rideId,
     alarmId: current.alarmId,
-    stops: stops.map(({ train, fireDate }) => ({ train, fireDate: fireDate / 1000 })),
+    stops: stops.map(({ train, phase, fireDate }) => ({
+      train,
+      phase: phase ?? "primary",
+      fireDate: fireDate / 1000,
+    })),
   }
   if (await moveArrivalAlarm(push).catch(() => false)) {
     await updateFromDevice(current, "app")
@@ -232,25 +267,26 @@ async function updateFromDevice(alarm: ArrivalAlarm, movedBy: "app" | "extension
   const rang = [...useRideStore.getState().arrivalAlarmRangStops]
   let moved = false
   const stops = alarm.stops.flatMap((stop) => {
-    const native = device.stops.find(({ train }) => train === stop.train)
-    if (rang.includes(stop.train) || !native) return [stop]
+    const native = device.stops.find((item) => matchesStop(item, stop))
+    const key = arrivalAlarmStopKey(stop.train, stop.phase)
+    if (rang.includes(key) || !native) return [stop]
 
     switch (native.status) {
       case "rang":
-        trackEvent("arrival_alarm_rang", { lead_minutes: alarm.leadMinutes })
-        rang.push(stop.train)
+        trackEvent("arrival_alarm_rang", { lead_minutes: alarm.leadMinutes, phase: stop.phase })
+        rang.push(key)
         return [{ ...stop, fireDate: native.fireDate }]
       case "missed":
         // It didn't ring, so it isn't counted as rang, but the alarm no longer has it.
-        trackEvent("arrival_alarm_missed", { lead_minutes: alarm.leadMinutes })
+        trackEvent("arrival_alarm_missed", { lead_minutes: alarm.leadMinutes, phase: stop.phase })
         return []
       case "unknown":
         return [stop]
+      case "scheduled":
+        if (native.fireDate === stop.fireDate) return [stop]
+        moved = true
+        return [{ ...stop, fireDate: native.fireDate }]
     }
-
-    if (native.fireDate === stop.fireDate) return [stop]
-    moved = true
-    return [{ ...stop, fireDate: native.fireDate }]
   })
 
   if (moved) trackEvent("arrival_alarm_rescheduled", { source: movedBy })
@@ -262,7 +298,7 @@ async function updateFromDevice(alarm: ArrivalAlarm, movedBy: "app" | "extension
   }
 
   // Off once no stop is left to ring.
-  const done = stops.every((stop) => rang.includes(stop.train))
+  const done = stops.every((stop) => rang.includes(arrivalAlarmStopKey(stop.train, stop.phase)))
   useRideStore.setState({ arrivalAlarm: done ? undefined : { ...alarm, stops }, arrivalAlarmRangStops: rang })
   return true
 }
@@ -314,11 +350,13 @@ export async function scheduleTestArrivalAlarm(seconds: number) {
     stops: [
       {
         train: 0,
+        phase: "primary",
         fireDate: now + seconds * 1000,
         title: translate("ride.alarmTitleTransfer", { station: getStationById("3700")?.name ?? "" }) ?? "",
       },
       {
         train: 1,
+        phase: "primary",
         fireDate: now + seconds * 4000,
         title: translate("ride.alarmTitle", { station: getStationById("4600")?.name ?? "" }) ?? "",
       },

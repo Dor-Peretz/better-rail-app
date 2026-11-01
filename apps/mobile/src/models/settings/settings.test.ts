@@ -12,6 +12,23 @@ test("can be created with default state", () => {
   expect(state.maxChanges).toBe(null)
   expect(state.trainSearchCount).toBe(0)
   expect(state.colorScheme).toBe("automatic")
+  expect(state.arrivalAlarmLeadMinutes).toBe(5)
+  expect(state.arrivalAlarmSecondWarningEnabled).toBe(false)
+})
+
+test("persists arrival alarm preferences and clamps invalid lead times", () => {
+  useSettingsStore.getState().setArrivalAlarmLeadMinutes(10)
+  useSettingsStore.getState().setArrivalAlarmSecondWarningEnabled(true)
+  const snapshot = getSettingsSnapshot(useSettingsStore.getState())
+  resetSettingsStore()
+  hydrateSettingsStore(snapshot)
+
+  expect(useSettingsStore.getState().arrivalAlarmLeadMinutes).toBe(10)
+  expect(useSettingsStore.getState().arrivalAlarmSecondWarningEnabled).toBe(true)
+
+  hydrateSettingsStore({ arrivalAlarmLeadMinutes: 4, arrivalAlarmSecondWarningEnabled: "yes" })
+  expect(useSettingsStore.getState().arrivalAlarmLeadMinutes).toBe(5)
+  expect(useSettingsStore.getState().arrivalAlarmSecondWarningEnabled).toBe(false)
 })
 
 test("persists and restores the color scheme preference", () => {

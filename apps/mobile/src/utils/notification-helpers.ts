@@ -77,12 +77,21 @@ TaskManager.defineTask(BACKGROUND_LIVE_RIDE_TASK, async ({ data, error }) => {
 const ARRIVAL_ALARM_UPDATES_CHANNEL = "better-rail-alarm-updates"
 
 const isPushStops = (stops: unknown): stops is ArrivalAlarmPush["stops"] =>
-  Array.isArray(stops) && stops.every((stop) => typeof stop?.train === "number" && typeof stop?.fireDate === "number")
+  Array.isArray(stops) &&
+  stops.every(
+    (stop) =>
+      typeof stop?.train === "number" &&
+      typeof stop?.fireDate === "number" &&
+      (stop?.phase === undefined || stop?.phase === "primary" || stop?.phase === "secondary"),
+  )
+
+const normalizePushStops = (stops: ArrivalAlarmPush["stops"]): ArrivalAlarmPush["stops"] =>
+  stops.map((stop) => ({ ...stop, phase: stop.phase ?? "primary" }))
 
 const parseStops = (json: string | undefined) => {
   try {
     const stops = JSON.parse(json ?? "")
-    return isPushStops(stops) ? stops : undefined
+    return isPushStops(stops) ? normalizePushStops(stops) : undefined
   } catch {
     return undefined
   }
@@ -115,7 +124,7 @@ const findArrivalAlarmPush = (raw: unknown, depth = 0): ArrivalAlarmPush | null 
   if (!raw || typeof raw !== "object" || depth > 5) return null
   const alarm = (raw as Record<string, unknown>).alarm as Record<string, unknown> | undefined
   if (alarm && typeof alarm.rideId === "string" && typeof alarm.alarmId === "string" && isPushStops(alarm.stops)) {
-    return alarm as ArrivalAlarmPush
+    return { ...alarm, stops: normalizePushStops(alarm.stops) } as ArrivalAlarmPush
   }
 
   for (const value of Object.values(raw)) {

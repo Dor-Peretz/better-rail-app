@@ -11,6 +11,7 @@ import {
   tint,
 } from "@expo/ui/swift-ui/modifiers"
 import { useRideStore } from "@/models"
+import { useSettingsStore } from "@/models/settings/settings"
 import {
   ARRIVAL_ALARM_LEAD_MINUTES,
   disableArrivalAlarm,
@@ -26,6 +27,8 @@ import { useArrivalAlarmStopOptions } from "./use-arrival-alarm-stop-options"
 /** Rings before the rider's stops. A native SwiftUI menu, so the glass reacts to touch. iOS 26+ only (AlarmKit). */
 export function ArrivalAlarmButton({ now }: { now: number }) {
   const arrivalAlarm = useRideStore((s) => s.arrivalAlarm)
+  const defaultLeadMinutes = useSettingsStore((s) => s.arrivalAlarmLeadMinutes)
+  const selectedLeadMinutes = arrivalAlarm?.leadMinutes ?? defaultLeadMinutes
   const stopOptions = useArrivalAlarmStopOptions(now)
 
   const modifiers = [
@@ -57,7 +60,7 @@ export function ArrivalAlarmButton({ now }: { now: number }) {
             <Button
               key={minutes}
               label={translate("ride.alarmLeadOption", { minutes }) ?? ""}
-              systemImage={arrivalAlarm?.leadMinutes === minutes ? "checkmark" : undefined}
+              systemImage={selectedLeadMinutes === minutes ? "checkmark" : undefined}
               onPress={async () => {
                 HapticFeedback.trigger("impactLight")
                 showEnableArrivalAlarmResult(await enableArrivalAlarm(minutes), minutes)
